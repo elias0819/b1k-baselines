@@ -135,6 +135,7 @@ def _compute_validation_losses(
     train_state_sharding: jax.sharding.NamedSharding,
     replicated_sharding: jax.sharding.NamedSharding,
     config: _config.TrainConfig,
+    vlac_weight_table: _vlac_weights.VlacWeightTable | None = None,
 ) -> float | None:
     """Compute validation losses over multiple batches."""
 
@@ -144,6 +145,11 @@ def _compute_validation_losses(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
         chunked_loss = model.compute_loss(rng, observation, actions, train=False)
+        chunk_weights = _gather_chunk_weights(observation, vlac_weight_table, actions.shape[-2])
+        if chunk_weights is not None:
+            weighted_loss = jnp.sum(chunked_loss * chunk_weights)
+            total_weight = jnp.maximum(jnp.sum(chunk_weights), 1e-6)
+            return weighted_loss / total_weight
         return jnp.mean(chunked_loss)
 
     def validation_step(state, batch, rng):
@@ -195,6 +201,7 @@ def compute_validation_loss(
     train_state_sharding: jax.sharding.NamedSharding,
     replicated_sharding: jax.sharding.NamedSharding,
     train_data_loader: _data_loader.DataLoader | None = None,
+    vlac_weight_table: _vlac_weights.VlacWeightTable | None = None,
 ) -> float | None:
     """Compute average validation loss over a few batches. Downloads validation dataset if missing locally."""
     # Extract training normalization stats
@@ -225,7 +232,9 @@ def compute_validation_loss(
         return None
 
     # Compute and return validation losses
-    return _compute_validation_losses(val_loader, train_state, mesh, train_state_sharding, replicated_sharding, config)
+    return _compute_validation_losses(
+        val_loader, train_state, mesh, train_state_sharding, replicated_sharding, config, vlac_weight_table
+    )
 
 
 def init_logging():
@@ -333,6 +342,38 @@ def init_train_state(
 
     return train_state, state_sharding
 
+def _gather_chunk_weights(
+    observation: _model.Observation,
+    vlac_weight_table: _vlac_weights.VlacWeightTable | None,
+    horizon: int,
+) -> jax.Array | None:
+    if vlac_weight_table is None or observation.episode_index is None:
+        return None
+
+    episode_index = observation.episode_index.astype(jnp.int32)
+    chunk_size = observation.chunk_size
+    if chunk_size is None:
+        chunk_size = jnp.full(episode_index.shape, horizon, dtype=jnp.int32)
+    else:
+        chunk_size = jnp.clip(chunk_size.astype(jnp.int32), 0, horizon)
+
+    chunk_start = observation.action_start
+    if chunk_start is None and observation.chunk_index is not None:
+        chunk_start = observation.chunk_index * chunk_size
+    if chunk_start is None:
+        chunk_start = jnp.zeros_like(chunk_size, dtype=jnp.int32)
+    else:
+        chunk_start = jnp.clip(chunk_start.astype(jnp.int32), 0)
+
+    weights = vlac_weight_table.weights[episode_index]
+    lengths = vlac_weight_table.lengths[episode_index]
+    max_len = weights.shape[-1]
+    positions = jnp.arange(horizon, dtype=jnp.int32)
+    indices = chunk_start[:, None] + positions[None, :]
+    clipped_indices = jnp.clip(indices, 0, max_len - 1)
+    gathered = jnp.take_along_axis(weights, clipped_indices, axis=1)
+    valid_mask = (positions[None, :] < chunk_size[:, None]) & (indices < lengths[:, None])
+    return jnp.where(valid_mask, gathered, vlac_weight_table.default_weight)
 
 @at.typecheck
 def train_step(
@@ -341,7 +382,7 @@ def train_step(
     state: training_utils.TrainState,
     batch: tuple[_model.Observation, _model.Actions],
     *,
-    vlac_weight_table: jax.Array | None = None,
+    vlac_weight_table: _vlac_weights.VlacWeightTable | None = None,
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
     model = nnx.merge(state.model_def, state.params)
     model.train()
@@ -353,23 +394,21 @@ def train_step(
     #     chunked_loss = model.compute_loss(rng, observation, actions, train=True)
     #     return jnp.mean(chunked_loss)
 
-    sample_weights = None
-    if vlac_weight_table is not None and observation.episode_index is not None:
-        sample_weights = vlac_weight_table[observation.episode_index.astype(jnp.int32)]
+    observation, actions = batch
+    chunk_weights = _gather_chunk_weights(observation, vlac_weight_table, actions.shape[-2])
 
     @at.typecheck
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
         chunked_loss = model.compute_loss(rng, observation, actions, train=True)
-        if sample_weights is not None:
-            total_weight = jnp.sum(sample_weights) * chunked_loss.shape[-1]
-            weighted_loss = jnp.sum(chunked_loss * sample_weights[..., None])
-            return weighted_loss / jnp.maximum(total_weight, 1e-6)
+        if chunk_weights is not None:
+            total_weight = jnp.maximum(jnp.sum(chunk_weights), 1e-6)
+            weighted_loss = jnp.sum(chunked_loss * chunk_weights)
+            return weighted_loss / total_weight
         return jnp.mean(chunked_loss)
 
     train_rng = jax.random.fold_in(rng, state.step)
-    observation, actions = batch
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
@@ -406,8 +445,8 @@ def train_step(
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
     }
-    if sample_weights is not None:
-        info["vlac_weight_mean"] = jnp.mean(sample_weights)
+    if chunk_weights is not None:
+        info["vlac_weight_mean"] = jnp.mean(chunk_weights)
     return new_state, info
 
 
@@ -472,14 +511,22 @@ def main(config: _config.TrainConfig):
             min_size=max_episode_index,
         )
         if vlac_table_np is not None:
-            vlac_weight_table = jax.device_put(jnp.asarray(vlac_table_np), replicated_sharding)
-            logging.info("VLAC weighting enabled with table of size %d", vlac_weight_table.shape[0])
+            vlac_weight_table = _vlac_weights.VlacWeightTable(
+                weights=jax.device_put(jnp.asarray(vlac_table_np.weights), replicated_sharding),
+                lengths=jax.device_put(jnp.asarray(vlac_table_np.lengths), replicated_sharding),
+                default_weight=vlac_table_np.default_weight,
+            )
+            logging.info(
+                "VLAC weighting enabled with table of size %d (max length %d)",
+                vlac_weight_table.weights.shape[0],
+                vlac_weight_table.weights.shape[1],
+            )
         else:
             logging.info("VLAC weight path provided but no weights loaded; proceeding without weighting.")
 
 
     ptrain_step = jax.jit(
-        functools.partial(train_step, config),
+        functools.partial(train_step, config, vlac_weight_table=vlac_weight_table),
         in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
         out_shardings=(train_state_sharding, replicated_sharding),
         donate_argnums=(1,),
@@ -507,7 +554,7 @@ def main(config: _config.TrainConfig):
             infos = []
         if step % config.val_log_interval == 0:
             val_loss = compute_validation_loss(
-                config, train_state, mesh, train_state_sharding, replicated_sharding, data_loader
+                config, train_state, mesh, train_state_sharding, replicated_sharding, data_loader, vlac_weight_table
             )
             if val_loss is not None:
                 wandb.log({"val_loss": val_loss}, step=step)

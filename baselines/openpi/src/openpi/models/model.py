@@ -99,8 +99,12 @@ class Observation(Generic[ArrayT]):
     tokenized_prompt_mask: at.Bool[ArrayT, "*b l"] | None = None
 
     episode_index: at.Int[ArrayT, "*b"] | None = None
-    # pi0-fast model specific fields.
 
+    action_start: at.Int[ArrayT, "*b"] | None = None
+    chunk_index: at.Int[ArrayT, "*b"] | None = None
+    chunk_size: at.Int[ArrayT, "*b"] | None = None
+    # pi0-fast model specific fields.
+    
     # Token auto-regressive mask (for FAST autoregressive model).
     token_ar_mask: at.Int[ArrayT, "*b l"] | None = None
     # Token loss mask (for FAST autoregressive model).
@@ -127,6 +131,9 @@ class Observation(Generic[ArrayT]):
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
             episode_index=data.get("episode_index"),
+            action_start=data.get("action_start", data.get("chunk_start")),
+            chunk_index=data.get("chunk_index"),
+            chunk_size=data.get("chunk_size", data.get("chunk_length")),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -134,8 +141,9 @@ class Observation(Generic[ArrayT]):
         result = dataclasses.asdict(self)
         result["image"] = result.pop("images")
         result["image_mask"] = result.pop("image_masks")
-        if "episode_index" in result and result["episode_index"] is None:
-            result.pop("episode_index")
+        for key in ("episode_index", "action_start", "chunk_index", "chunk_size"):
+            if key in result and result[key] is None:
+                result.pop(key)
         return result
 
 

@@ -150,6 +150,21 @@ def create_behavior_dataset(data_config: _config.DataConfig, action_horizon: int
 
     return dataset
 
+def create_sub_behavior_dataset(data_config: _config.DataConfig, action_horizon: int) -> Dataset:
+
+    dataset = lerobot_dataset.LeRobotDataset(
+        data_config.repo_id,
+        delta_timestamps={
+            key: [t / 30.0 for t in range(action_horizon)] for key in data_config.action_sequence_keys
+        },
+        episodes=data_config.episodes_index,
+    )
+
+    if data_config.prompt_from_task:
+        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset.meta.tasks)])
+
+    return dataset
+
 
 def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
@@ -303,6 +318,7 @@ def create_behavior_data_loader(
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     data_config = config.data.create(config.assets_dirs, config.model)
     dataset = create_behavior_dataset(data_config, action_horizon=config.model.action_horizon)
+    # dataset = create_sub_behavior_dataset(data_config, action_horizon=config.model.action_horizon)
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
 
     data_loader = TorchDataLoader(
@@ -316,7 +332,6 @@ def create_behavior_data_loader(
     )
     
     return DataLoaderImpl(data_config, data_loader)
-
 
 def create_torch_data_loader(
     data_config: _config.DataConfig,
@@ -581,10 +596,41 @@ class DataLoaderImpl(DataLoader):
     def __init__(self, data_config: _config.DataConfig, data_loader: TorchDataLoader | RLDSDataLoader):
         self._data_config = data_config
         self._data_loader = data_loader
+    def _ensure_chunk_metadata(self, batch: dict) -> dict:
+        """Ensure chunk metadata is available in the batch."""
+        actions = batch.get("actions")
+        if actions is None:
+            return batch
 
+        if isinstance(actions, jax.Array):
+            full_fn = lambda value: jnp.full((actions.shape[0],), value, dtype=jnp.int32)
+        elif isinstance(actions, torch.Tensor):
+            full_fn = lambda value: torch.full(
+                (actions.shape[0],), value, dtype=torch.int32, device=actions.device
+            )
+        else:
+            full_fn = lambda value: np.full((actions.shape[0],), value, dtype=np.int32)
+
+        if "chunk_size" not in batch:
+            if "chunk_length" in batch:
+                batch["chunk_size"] = batch["chunk_length"]
+            else:
+                horizon = actions.shape[1] if hasattr(actions, "shape") and len(actions.shape) > 1 else 0
+                batch["chunk_size"] = full_fn(horizon)
+
+        if "action_start" not in batch:
+            if "chunk_start" in batch:
+                batch["action_start"] = batch["chunk_start"]
+            elif "chunk_index" in batch:
+                batch["action_start"] = batch["chunk_index"] * batch["chunk_size"]
+            else:
+                batch["action_start"] = full_fn(0)
+
+        return batch
     def data_config(self) -> _config.DataConfig:
         return self._data_config
 
     def __iter__(self):
         for batch in self._data_loader:
+            batch = self._ensure_chunk_metadata(batch)
             yield _model.Observation.from_dict(batch), batch["actions"]

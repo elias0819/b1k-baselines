@@ -570,7 +570,7 @@ class TrainConfig:
     vlac_weight_path: str | None = None
     # Default weight to use when an episode is missing from the VLAC file.
     vlac_default_weight: float = 1.0
-
+    vlac_chunk_size: int | None = None
     # Used to pass metadata to the policy server.
     policy_metadata: dict[str, Any] | None = None
 

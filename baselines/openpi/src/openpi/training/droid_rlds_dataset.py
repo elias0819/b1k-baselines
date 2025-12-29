@@ -170,6 +170,9 @@ class DroidRldsDataset:
 
             # Gather the actions for each chunk
             traj["actions"] = tf.gather(traj["actions"], action_chunk_indices)
+            traj["chunk_start"] = tf.range(traj_len, dtype=tf.int32)
+            traj["chunk_index"] = traj["chunk_start"]
+            traj["chunk_size"] = tf.fill([traj_len], action_chunk_size)
             return traj
 
         dataset = dataset.traj_map(chunk_actions, num_parallel_calls)

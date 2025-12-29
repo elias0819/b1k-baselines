@@ -358,7 +358,7 @@ def train_loop(config: _config.TrainConfig):
     # Pass the original batch size to data loader - it will handle DDP splitting internally
     loader, data_config = build_datasets(config)
 
-    vlac_weight_tensor = None
+    vlac_weight_table = None
     if config.vlac_weight_path:
         max_episode_index = max(data_config.episodes_index) + 1 if data_config.episodes_index else 0
         vlac_mapping = _vlac_weights.load_weight_mapping(config.vlac_weight_path)
@@ -368,8 +368,16 @@ def train_loop(config: _config.TrainConfig):
             min_size=max_episode_index,
         )
         if vlac_table_np is not None:
-            vlac_weight_tensor = torch.tensor(vlac_table_np, device=device, dtype=torch.float32)
-            logging.info("VLAC weighting enabled with table of size %d", vlac_weight_tensor.shape[0])
+            vlac_weight_table = _vlac_weights.VlacWeightTable(
+                weights=torch.tensor(vlac_table_np.weights, device=device, dtype=torch.float32),
+                lengths=torch.tensor(vlac_table_np.lengths, device=device, dtype=torch.int64),
+                default_weight=vlac_table_np.default_weight,
+            )
+            logging.info(
+                "VLAC weighting enabled with table of size %d (max length %d)",
+                vlac_weight_table.weights.shape[0],
+                vlac_weight_table.weights.shape[1],
+            )
         else:
             logging.info("VLAC weight path provided but no weights loaded; proceeding without weighting.")
 
@@ -493,7 +501,37 @@ def train_loop(config: _config.TrainConfig):
         progress = min(1.0, (step - warmup_steps) / max(1, decay_steps - warmup_steps))
         cos = 0.5 * (1 + np.cos(np.pi * progress))
         return end_lr + (peak_lr - end_lr) * cos
+    
+    def gather_chunk_weights(observation: _model.Observation, horizon: int) -> torch.Tensor | None:
+        if vlac_weight_table is None or getattr(observation, "episode_index", None) is None:
+            return None
 
+        episode_index = observation.episode_index.to(torch.long)
+        chunk_size = getattr(observation, "chunk_size", None)
+        if chunk_size is None:
+            chunk_size = torch.full_like(episode_index, horizon, dtype=torch.long, device=device)
+        else:
+            chunk_size = torch.clamp(chunk_size.to(torch.long), min=0, max=horizon)
+
+        chunk_start = getattr(observation, "action_start", None)
+        if chunk_start is None and getattr(observation, "chunk_index", None) is not None:
+            chunk_start = observation.chunk_index.to(torch.long) * chunk_size
+        if chunk_start is None:
+            chunk_start = torch.zeros_like(chunk_size, dtype=torch.long, device=device)
+        else:
+            chunk_start = torch.clamp(chunk_start.to(torch.long), min=0)
+
+        weights = vlac_weight_table.weights[episode_index]
+        lengths = vlac_weight_table.lengths[episode_index]
+        max_len = weights.shape[-1]
+        positions = torch.arange(horizon, device=device, dtype=torch.long)
+        indices = chunk_start.unsqueeze(1) + positions.unsqueeze(0)
+        clipped_indices = torch.clamp(indices, min=0, max=max_len - 1)
+        gathered = torch.gather(weights, 1, clipped_indices)
+        valid_mask = (positions.unsqueeze(0) < chunk_size.unsqueeze(1)) & (indices < lengths.unsqueeze(1))
+        default_value = torch.as_tensor(vlac_weight_table.default_weight, device=device, dtype=weights.dtype)
+        return torch.where(valid_mask, gathered, default_value)
+    
     model.train()
     start_time = time.time()
     infos = []  # Collect stats over log interval
@@ -549,11 +587,10 @@ def train_loop(config: _config.TrainConfig):
                 losses = torch.tensor(losses, device=device, dtype=torch.float32)
 
             per_step_loss = losses.mean(dim=-1)
-            sample_weights = None
-            if vlac_weight_tensor is not None and getattr(observation, "episode_index", None) is not None:
-                sample_weights = vlac_weight_tensor[observation.episode_index.to(torch.long)]
-                weighted_loss = (per_step_loss * sample_weights[:, None]).sum()
-                loss = weighted_loss / torch.clamp(sample_weights.sum() * per_step_loss.shape[-1], min=1e-6)
+            chunk_weights = gather_chunk_weights(observation, per_step_loss.shape[-1])
+            if chunk_weights is not None:
+                weighted_loss = (per_step_loss * chunk_weights).sum()
+                loss = weighted_loss / torch.clamp(chunk_weights.sum(), min=1e-6)
             else:
                 loss = per_step_loss.mean()
 
@@ -587,8 +624,8 @@ def train_loop(config: _config.TrainConfig):
                         "learning_rate": optim.param_groups[0]["lr"],
                         "grad_norm": float(grad_norm) if isinstance(grad_norm, torch.Tensor) else grad_norm,
                         **(
-                            {"vlac_weight_mean": sample_weights.mean().item()}
-                            if sample_weights is not None
+                            {"vlac_weight_mean": chunk_weights.mean().item()}
+                            if chunk_weights is not None
                             else {}
                         ),
                     }

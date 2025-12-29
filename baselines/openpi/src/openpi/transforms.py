@@ -95,7 +95,14 @@ class RepackTransform(DataTransformFn):
     """
 
     structure: at.PyTree[str]
-    passthrough_keys: Sequence[str] = ("episode_index",)
+    passthrough_keys: Sequence[str] = (
+        "episode_index",
+        "action_start",
+        "chunk_start",
+        "chunk_index",
+        "chunk_size",
+        "chunk_length",
+    )
     def __call__(self, data: DataDict) -> DataDict:
         flat_item = flatten_dict(data)
         #return jax.tree.map(lambda k: flat_item[k], self.structure)
