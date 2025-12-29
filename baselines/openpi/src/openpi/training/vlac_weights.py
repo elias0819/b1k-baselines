@@ -14,7 +14,7 @@ class VlacWeightTable(NamedTuple):
     weights: np.ndarray
     lengths: np.ndarray
     default_weight: float
-
+    episode_index: np.ndarray
 
 def _extract_episode_and_weight(entry: dict) -> tuple[int | None, object | None]:
     """Try to read an episode index and weight from a JSON entry."""
@@ -108,22 +108,31 @@ def build_weight_table(
         LOGGER.warning("No VLAC weights found and no minimum size requested; weighting will be skipped.")
         return None
 
-    table_size = max(min_size, max(mapping.keys(), default=-1) + 1)
-    sequences: list[np.ndarray] = [np.asarray([default_weight], dtype=np.float32) for _ in range(table_size)]
+    episode_ids = np.asarray(sorted(ep for ep in mapping.keys() if ep >= 0), dtype=np.int32)
+    if episode_ids.size == 0:
+        if min_size == 0:
+            LOGGER.warning("No VLAC weights found and no minimum size requested; weighting will be skipped.")
+            return None
+        episode_ids = np.arange(min_size, dtype=np.int32)
 
+    # Respect min_size by padding additional placeholder rows with default weights if requested.
+    if min_size > episode_ids.size:
+        extra_rows = np.arange(episode_ids.max() + 1, episode_ids.max() + 1 + (min_size - episode_ids.size), dtype=np.int32)
+        episode_ids = np.concatenate([episode_ids, extra_rows], axis=0)
+
+    sequences: list[np.ndarray] = []
     max_len = max(1, chunk_size or 0)
-    for episode, weight_array in mapping.items():
-        if episode < 0:
-            LOGGER.debug("Skipping negative episode index %s in VLAC weights", episode)
+    for ep in episode_ids:
+        seq = mapping.get(int(ep))
+        if seq is None:
+            sequences.append(np.asarray([default_weight], dtype=np.float32))
             continue
-        if episode >= len(sequences):
-            sequences.extend(np.asarray([default_weight], dtype=np.float32) for _ in range(episode + 1 - len(sequences)))
-        weight_array = np.asarray(weight_array, dtype=np.float32).flatten()
-        if weight_array.size == 0:
+        seq_arr = np.asarray(seq, dtype=np.float32).flatten()
+        if seq_arr.size == 0:
+            sequences.append(np.asarray([default_weight], dtype=np.float32))
             continue
-        sequences[episode] = weight_array
-        max_len = max(max_len, weight_array.shape[0])
-
+        sequences.append(seq_arr)
+        max_len = max(max_len, seq_arr.shape[0])
     weights = np.full((len(sequences), max_len), default_weight, dtype=np.float32)
     lengths = np.full((len(sequences),), max_len if not mapping else 1, dtype=np.int32)
     for idx, seq in enumerate(sequences):
@@ -131,4 +140,9 @@ def build_weight_table(
         weights[idx, :seq_len] = seq[:seq_len]
         lengths[idx] = seq_len
 
-    return VlacWeightTable(weights=weights, lengths=lengths, default_weight=float(default_weight))
+    return VlacWeightTable(
+        weights=weights,
+        lengths=lengths,
+        default_weight=float(default_weight),
+        episode_index=episode_ids,
+    )

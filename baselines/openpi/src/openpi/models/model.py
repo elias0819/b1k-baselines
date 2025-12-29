@@ -98,7 +98,7 @@ class Observation(Generic[ArrayT]):
     # Tokenized prompt mask.
     tokenized_prompt_mask: at.Bool[ArrayT, "*b l"] | None = None
 
-    episode_index: at.Int[ArrayT, "*b"] | None = None
+    episode_index: at.Int[ArrayT, "*b l"] | None = None
 
     action_start: at.Int[ArrayT, "*b"] | None = None
     chunk_index: at.Int[ArrayT, "*b"] | None = None

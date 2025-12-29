@@ -136,9 +136,12 @@ def _gather_chunk_weights(
     vlac_weight_table: _vlac_weights.VlacWeightTable | None,
     horizon: int,
 ) -> jax.Array | None:
-    if vlac_weight_table is None or observation.episode_index is None:
+    if vlac_weight_table is None:
+        logging.info("vlac_weight_table is None")
         return None
-
+    if observation.episode_index is None:
+        logging.info("observation.episode_index is None")
+        return None
     episode_index = observation.episode_index.astype(jnp.int32)
     chunk_size = observation.chunk_size
     if chunk_size is None:
@@ -154,16 +157,20 @@ def _gather_chunk_weights(
     else:
         chunk_start = jnp.clip(chunk_start.astype(jnp.int32), 0)
 
-    weights = vlac_weight_table.weights[episode_index]
-    lengths = vlac_weight_table.lengths[episode_index]
+    episode_ids = jnp.asarray(vlac_weight_table.episode_ids)
+    row_idx = jnp.searchsorted(episode_ids, episode_index)
+    row_idx = jnp.clip(row_idx, 0, episode_ids.shape[0] - 1)
+    valid_episode = episode_ids[row_idx] == episode_index
+
+    weights = vlac_weight_table.weights[row_idx]
+    lengths = vlac_weight_table.lengths[row_idx]
     max_len = weights.shape[-1]
     positions = jnp.arange(horizon, dtype=jnp.int32)
     indices = chunk_start[:, None] + positions[None, :]
     clipped_indices = jnp.clip(indices, 0, max_len - 1)
     gathered = jnp.take_along_axis(weights, clipped_indices, axis=1)
-    valid_mask = (positions[None, :] < chunk_size[:, None]) & (indices < lengths[:, None])
+    valid_mask = valid_episode[:, None] & (positions[None, :] < chunk_size[:, None]) & (indices < lengths[:, None])
     return jnp.where(valid_mask, gathered, vlac_weight_table.default_weight)
-
 
 @at.typecheck
 def train_step(
@@ -187,20 +194,23 @@ def train_step(
     #     return jnp.mean(chunked_loss)
     
     observation, actions = batch
+    logging.info("vlac_weight_table: %s", vlac_weight_table)
     chunk_weights = _gather_chunk_weights(observation, vlac_weight_table, actions.shape[-2])
-
+    logging.info("chunk_weights: %s", chunk_weights)
     @at.typecheck
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
         chunked_loss = model.compute_loss(rng, observation, actions, train=True)
         if chunk_weights is not None:
-            print("chunked_loss:", chunked_loss)
+            # print("chunked_loss:", chunked_loss)
             print("chunk_weights:", chunk_weights)
             weighted_loss = jnp.sum(chunked_loss * chunk_weights)
             total_weight = jnp.maximum(jnp.sum(chunk_weights), 1e-6)
             return weighted_loss / total_weight # 使用权重计算加权均值
-        return jnp.mean(chunked_loss) # 没有权重取均值
+        else:
+            logging.info("chunk_weights is None")
+            return jnp.mean(chunked_loss) # 没有权重取均值
 
     train_rng = jax.random.fold_in(rng, state.step)
 
@@ -297,12 +307,12 @@ def main(config: _config.TrainConfig):
     vlac_weight_table = None
     if config.vlac_weight_path:
         data_config = data_loader.data_config()
-        max_episode_index = max(data_config.episodes_index) + 1 if data_config.episodes_index else 0
+        # max_episode_index = max(data_config.episodes_index) + 1 if data_config.episodes_index else 0
         vlac_mapping = _vlac_weights.load_weight_mapping(config.vlac_weight_path)
         vlac_table_np = _vlac_weights.build_weight_table(
             vlac_mapping,
             default_weight=config.vlac_default_weight,
-            min_size=max_episode_index,
+            min_size=0,
             chunk_size=config.vlac_chunk_size or config.model.action_horizon,
         )
         if vlac_table_np is not None:
@@ -310,6 +320,7 @@ def main(config: _config.TrainConfig):
                 weights=jax.device_put(jnp.asarray(vlac_table_np.weights), replicated_sharding),
                 lengths=jax.device_put(jnp.asarray(vlac_table_np.lengths), replicated_sharding),
                 default_weight=vlac_table_np.default_weight,
+                episode_index=jax.device_put(jnp.asarray(vlac_table_np.episode_index), replicated_sharding),
             )
             logging.info(
                 "VLAC weighting enabled with table of size %d (max length %d)",

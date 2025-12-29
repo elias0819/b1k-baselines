@@ -97,6 +97,8 @@ class RepackTransform(DataTransformFn):
     structure: at.PyTree[str]
     passthrough_keys: Sequence[str] = (
         "episode_index",
+        "episode",
+        "episode_id",
         "action_start",
         "chunk_start",
         "chunk_index",
@@ -108,7 +110,11 @@ class RepackTransform(DataTransformFn):
         #return jax.tree.map(lambda k: flat_item[k], self.structure)
         repacked = jax.tree.map(lambda k: flat_item[k], self.structure)
         # Preserve optional metadata (e.g., episode_index) if present.
-        passthrough = {k.split("/")[-1]: flat_item[k] for k in self.passthrough_keys if k in flat_item}
+        passthrough = {}
+        passthrough_suffixes = set(self.passthrough_keys)
+        for key, value in flat_item.items():
+            if key.split("/")[-1] in passthrough_suffixes:
+                passthrough[key.split("/")[-1]] = value
         if passthrough:
             # dataclasses.replace can't be used here since repacked can be nested; merge manually.
             repacked.update(passthrough)
