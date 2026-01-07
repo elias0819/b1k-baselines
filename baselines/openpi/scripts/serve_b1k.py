@@ -50,7 +50,7 @@ class Args:
     default_prompt: str | None = None
 
     # Dataset root, used to retrieve the prompt of the task if taskname is not None.
-    dataset_root: str | None = "/scr/behavior/2025-challenge-demos"
+    dataset_root: str | None = None 
     # If provided, will be used to retrieve the prompt of the task, otherwise use turning_on_radio as default.
     task_name: str | None = None
 

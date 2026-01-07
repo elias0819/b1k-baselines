@@ -1,7 +1,7 @@
 from collections.abc import Callable, Mapping, Sequence
 import dataclasses
 import re
-from typing import Protocol, TypeAlias, TypeVar, runtime_checkable
+from typing import Any, Protocol, TypeAlias, TypeVar, runtime_checkable
 
 import flax.traverse_util as traverse_util
 import jax
@@ -19,6 +19,29 @@ NormStats: TypeAlias = _normalize.NormStats
 T = TypeVar("T")
 S = TypeVar("S")
 
+METADATA_PASSTHROUGH_KEYS: tuple[str, ...] = (
+    "episode_index",
+    "episode",
+    "episode_id",
+    "action_start",
+    "chunk_start",
+    "chunk_index",
+    "chunk_size",
+    "chunk_length",
+)
+
+
+def merge_metadata(
+    target: dict[str, Any],
+    source: Mapping[str, Any],
+    *,
+    keys: Sequence[str] = METADATA_PASSTHROUGH_KEYS,
+) -> dict[str, Any]:
+    """Copy optional metadata fields from ``source`` into ``target`` if present."""
+    for key in keys:
+        if key in source:
+            target[key] = source[key]
+    return target
 
 @runtime_checkable
 class DataTransformFn(Protocol):
@@ -95,16 +118,7 @@ class RepackTransform(DataTransformFn):
     """
 
     structure: at.PyTree[str]
-    passthrough_keys: Sequence[str] = (
-        "episode_index",
-        "episode",
-        "episode_id",
-        "action_start",
-        "chunk_start",
-        "chunk_index",
-        "chunk_size",
-        "chunk_length",
-    )
+    passthrough_keys: Sequence[str] = METADATA_PASSTHROUGH_KEYS
     def __call__(self, data: DataDict) -> DataDict:
         flat_item = flatten_dict(data)
         #return jax.tree.map(lambda k: flat_item[k], self.structure)

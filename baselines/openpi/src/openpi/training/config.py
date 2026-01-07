@@ -826,6 +826,8 @@ _CONFIGS = [
         # num_workers=0,
         # resume=True,
     ),
+
+    # ldz
     TrainConfig(
         name="pi05_task0",   
         exp_name="pi05_task0",   
@@ -859,6 +861,29 @@ _CONFIGS = [
         # num_workers=0,
     ),
     TrainConfig(
+        name="pi05_task0_subtask",   
+        exp_name="pi05_task0_subtask",   
+        project_name="B1K",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=50,
+        ),
+        data=LeRobotB1KDataConfig(
+            repo_id="behavior-1k/2025-challenge-demos",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                behavior_dataset_root="/mnt/lidongze/upload/behavior-1k/2025-challenge-demos",
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/mnt/lidongze/upload/checkpoints/pi05_sub_task/turning_on_radio/28000/params"
+        ),
+        num_train_steps=14_000,
+        ema_decay=None,
+        assets_base_dir="/mnt/lidongze/sink/VLAC/baseline/outputs/assets",
+        checkpoint_base_dir="/mnt/lidongze/sink/VLAC/baseline/outputs/checkpoints",
+    ),
+    TrainConfig(
         name="pi05_task0_vlac",   
         exp_name="pi05_task0_vlac",   
         project_name="B1K",
@@ -881,6 +906,29 @@ _CONFIGS = [
         assets_base_dir="/mnt/lidongze/sink/VLAC/baseline/outputs/assets",
         checkpoint_base_dir="/mnt/lidongze/sink/VLAC/baseline/outputs/checkpoints",
         # num_workers=0,
+    ),
+    TrainConfig(
+        name="pi05_task0_subtask_vlac",   
+        exp_name="pi05_task0_subtask_vlac",   
+        project_name="B1K_VLAC",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=50,
+        ),
+        data=LeRobotB1KDataConfig(
+            repo_id="behavior-1k/2025-challenge-demos",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                behavior_dataset_root="/mnt/lidongze/upload/behavior-1k/2025-challenge-demos",
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/mnt/lidongze/upload/checkpoints/pi05_sub_task/turning_on_radio/28000/params"
+        ),
+        num_train_steps=14_000,
+        ema_decay=None,
+        assets_base_dir="/mnt/lidongze/sink/VLAC/baseline/outputs/assets",
+        checkpoint_base_dir="/mnt/lidongze/sink/VLAC/baseline/outputs/checkpoints",
     ),
     #
     # Fine-tuning Libero configs.

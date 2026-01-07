@@ -84,6 +84,7 @@ class AlohaInputs(transforms.DataTransformFn):
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
 
+        transforms.merge_metadata(inputs, data)
         return inputs
 
 

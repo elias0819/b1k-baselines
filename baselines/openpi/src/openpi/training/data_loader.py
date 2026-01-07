@@ -598,6 +598,40 @@ class DataLoaderImpl(DataLoader):
         self._data_loader = data_loader
     def _ensure_chunk_metadata(self, batch: dict) -> dict:
         """Ensure chunk metadata is available in the batch."""
+        def _expand_last_dim(x):
+            """Expand a (B,) metadata field to (B,1) to match Observation shape expectations."""
+            if hasattr(x, "ndim") and x.ndim == 1:
+                if isinstance(x, jax.Array):
+                    return jnp.expand_dims(x, -1)
+                if isinstance(x, torch.Tensor):
+                    return torch.unsqueeze(x, -1)
+                return np.expand_dims(x, -1)
+            return x
+
+        def _broadcast_episode_index(x):
+            """Broadcast episode_index to match token sequence length if available."""
+            if not hasattr(x, "shape"):
+                return x
+
+            seq_ref = None
+            for key in ("tokenized_prompt", "token_ar_mask", "token_loss_mask"):
+                if key in batch:
+                    seq_ref = batch[key]
+                    break
+
+            if seq_ref is None or not hasattr(seq_ref, "shape"):
+                return x
+
+            target_len = seq_ref.shape[-1]
+            if x.shape[-1] == target_len:
+                return x
+
+            if isinstance(x, jax.Array):
+                return jnp.broadcast_to(x, (*x.shape[:-1], target_len))
+            if isinstance(x, torch.Tensor):
+                return x.expand(*x.shape[:-1], target_len)
+            return np.broadcast_to(x, (*x.shape[:-1], target_len))
+        
         actions = batch.get("actions")
         if actions is None:
             return batch
@@ -625,7 +659,8 @@ class DataLoaderImpl(DataLoader):
                 batch["action_start"] = batch["chunk_index"] * batch["chunk_size"]
             else:
                 batch["action_start"] = full_fn(0)
-
+        if "episode_index" in batch:
+            batch["episode_index"] = _broadcast_episode_index(_expand_last_dim(batch["episode_index"]))
         return batch
     def data_config(self) -> _config.DataConfig:
         return self._data_config

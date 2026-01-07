@@ -71,6 +71,7 @@ class DroidInputs(transforms.DataTransformFn):
                 data["prompt"] = data["prompt"].decode("utf-8")
             inputs["prompt"] = data["prompt"]
 
+        transforms.merge_metadata(inputs, data)
         return inputs
 
 

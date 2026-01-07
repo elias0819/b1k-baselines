@@ -142,14 +142,19 @@ def _gather_chunk_weights(
     if observation.episode_index is None:
         logging.info("observation.episode_index is None")
         return None
-    episode_index = observation.episode_index.astype(jnp.int32)
+    episode_index = observation.episode_index
+    if episode_index.ndim > 1:
+        episode_index = episode_index[..., 0]
+    episode_index = episode_index.astype(jnp.int32)
     chunk_size = observation.chunk_size
+    logging.info("chunk_size: %s", chunk_size)
     if chunk_size is None:
         chunk_size = jnp.full(episode_index.shape, horizon, dtype=jnp.int32)
     else:
         chunk_size = jnp.clip(chunk_size.astype(jnp.int32), 0, horizon)
 
     chunk_start = observation.action_start
+    logging.info("chunk_start: %s", chunk_start)
     if chunk_start is None and observation.chunk_index is not None:
         chunk_start = observation.chunk_index * chunk_size
     if chunk_start is None:
@@ -157,12 +162,13 @@ def _gather_chunk_weights(
     else:
         chunk_start = jnp.clip(chunk_start.astype(jnp.int32), 0)
 
-    episode_ids = jnp.asarray(vlac_weight_table.episode_ids)
+    episode_ids = jnp.asarray(vlac_weight_table.episode_index)
     row_idx = jnp.searchsorted(episode_ids, episode_index)
     row_idx = jnp.clip(row_idx, 0, episode_ids.shape[0] - 1)
     valid_episode = episode_ids[row_idx] == episode_index
 
     weights = vlac_weight_table.weights[row_idx]
+    logging.info("weights shape: %s", weights.shape)
     lengths = vlac_weight_table.lengths[row_idx]
     max_len = weights.shape[-1]
     positions = jnp.arange(horizon, dtype=jnp.int32)
@@ -194,17 +200,16 @@ def train_step(
     #     return jnp.mean(chunked_loss)
     
     observation, actions = batch
-    logging.info("vlac_weight_table: %s", vlac_weight_table)
+    #logging.info("vlac_weight_table: %s", vlac_weight_table)
     chunk_weights = _gather_chunk_weights(observation, vlac_weight_table, actions.shape[-2])
-    logging.info("chunk_weights: %s", chunk_weights)
     @at.typecheck
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
         chunked_loss = model.compute_loss(rng, observation, actions, train=True)
         if chunk_weights is not None:
-            # print("chunked_loss:", chunked_loss)
-            print("chunk_weights:", chunk_weights)
+            #logging.info("chunked_loss: %s", chunked_loss)
+            #logging.info("chunk_weights: %s", chunk_weights)
             weighted_loss = jnp.sum(chunked_loss * chunk_weights)
             total_weight = jnp.maximum(jnp.sum(chunk_weights), 1e-6)
             return weighted_loss / total_weight # 使用权重计算加权均值
@@ -217,7 +222,6 @@ def train_step(
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
     loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
-
     params = state.params.filter(config.trainable_filter)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
     new_params = optax.apply_updates(params, updates)
